@@ -107,8 +107,7 @@ def search_one_way(from_entity, to_entity, depart_date):
     return None
 
 
-def process_telegram
-(api_response):
+def parse_itineraries(api_response):
     flights = []
     if not api_response:
         return flights
