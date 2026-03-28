@@ -16,7 +16,6 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CHECK_INTERVAL_HOURS = int(os.environ.get("CHECK_INTERVAL_HOURS", "12"))
 PRICE_DROP_THRESHOLD = float(os.environ.get("PRICE_DROP_THRESHOLD", "5"))
-
 RAPIDAPI_HOST = "flights-sky.p.rapidapi.com"
 DB_PATH = Path("data/flights.db")
 
@@ -25,6 +24,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 log = logging.getLogger(__name__)
+
 
 # ---- DB helpers ----
 def init_db():
@@ -56,12 +56,14 @@ def init_db():
     con.commit()
     con.close()
 
+
 # ---- API helpers ----
 def api_headers():
     return {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": RAPIDAPI_HOST,
     }
+
 
 def search_airport(query):
     url = "https://flights-sky.p.rapidapi.com/flights/auto-complete"
@@ -85,6 +87,7 @@ def search_airport(query):
         log.error(f"Airport search error: {e}")
     return None
 
+
 def search_one_way(from_entity, to_entity, depart_date):
     url = "https://flights-sky.p.rapidapi.com/flights/search-one-way"
     params = {
@@ -103,12 +106,18 @@ def search_one_way(from_entity, to_entity, depart_date):
         log.error(f"Flight search error: {e}")
     return None
 
-def parse_itineraries(api_response):
+
+def process_telegram
+(api_response):
     flights = []
     if not api_response:
         return flights
     data = api_response.get("data", {})
+    if not data or not isinstance(data, dict):
+        return flights
     itineraries = data.get("itineraries", [])
+    if not itineraries:
+        return flights
     for it in itineraries[:10]:
         price_raw = it.get("price", {}).get("raw", 0)
         price_fmt = it.get("price", {}).get("formatted", "N/A")
@@ -122,6 +131,7 @@ def parse_itineraries(api_response):
         stop_count = leg.get("stopCount", 0)
         carriers = leg.get("carriers", {}).get("marketing", [])
         airline = carriers[0].get("name", "Bilinmiyor") if carriers else "Bilinmiyor"
+
         flights.append({
             "airline": airline,
             "price": price_raw,
@@ -132,6 +142,7 @@ def parse_itineraries(api_response):
             "stops": stop_count,
         })
     return flights
+
 
 # ---- Telegram helpers ----
 def send_telegram(text, parse_mode="Markdown"):
@@ -145,6 +156,7 @@ def send_telegram(text, parse_mode="Markdown"):
     except Exception as e:
         log.error(f"Telegram send error: {e}")
 
+
 def get_updates(offset=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     params = {"timeout": 5}
@@ -156,23 +168,27 @@ def get_updates(offset=None):
         return r.json().get("result", [])
     except Exception as e:
         log.error(f"Telegram getUpdates error: {e}")
-    return []
+        return []
+
 
 # ---- Command handlers ----
 def cmd_add(args):
     if len(args) < 3:
         return "Kullanim: /add ORIGIN DEST YYYY-MM-DD\nOrnek: /add IST ADB 2026-05-08"
+
     origin_q, dest_q, date_str = args[0], args[1], args[2]
     try:
         datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
         return "Tarih formati hatali. YYYY-MM-DD kullanin."
+
     origin = search_airport(origin_q)
     if not origin:
         return f"Kalkis havaalani bulunamadi: {origin_q}"
     dest = search_airport(dest_q)
     if not dest:
         return f"Varis havaalani bulunamadi: {dest_q}"
+
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute(
@@ -183,6 +199,7 @@ def cmd_add(args):
     route_id = cur.lastrowid
     con.close()
     return f"Rota eklendi (#{route_id}): {origin['title']} -> {dest['title']} | {date_str}"
+
 
 def cmd_remove(args):
     if not args:
@@ -202,6 +219,7 @@ def cmd_remove(args):
         return f"Rota #{rid} silindi."
     return f"Rota #{rid} bulunamadi."
 
+
 def cmd_list():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
@@ -212,8 +230,9 @@ def cmd_list():
         return "Takip edilen rota yok. /add ile ekleyin."
     lines = ["*Takip Edilen Rotalar:*"]
     for r in rows:
-        lines.append(f"#{r[0]}  {r[1]} -> {r[2]}  Tarih: {r[3]}")
+        lines.append(f"#{r[0]} {r[1]} -> {r[2]} Tarih: {r[3]}")
     return "\n".join(lines)
+
 
 def cmd_check():
     con = sqlite3.connect(DB_PATH)
@@ -223,16 +242,24 @@ def cmd_check():
     con.close()
     if not rows:
         return "Takip edilen rota yok."
+
     messages = []
     for r in rows:
         rid, origin, dest, date_str, o_eid, d_eid = r
+
+        if not o_eid or not d_eid:
+            messages.append(f"#{rid} {origin}->{dest} {date_str}: Havaalani ID eksik, rota yeniden eklenmelidir.")
+            continue
+
         api_resp = search_one_way(o_eid, d_eid, date_str)
         flights = parse_itineraries(api_resp)
         if not flights:
             messages.append(f"#{rid} {origin}->{dest} {date_str}: Ucus bulunamadi.")
             continue
+
         best = min(flights, key=lambda f: f["price"])
         line = f"#{rid} {origin}->{dest} {date_str}\nEn ucuz: {best['airline']} {best['price_formatted']} ({best['stops']} aktarma, {best['duration_min']}dk)"
+
         con2 = sqlite3.connect(DB_PATH)
         cur2 = con2.cursor()
         cur2.execute("SELECT price FROM price_history WHERE route_id=? ORDER BY id DESC LIMIT 1", (rid,))
@@ -241,6 +268,7 @@ def cmd_check():
             diff_pct = ((best["price"] - prev[0]) / prev[0]) * 100
             if diff_pct < -PRICE_DROP_THRESHOLD:
                 line += f"\n\u26a0 Fiyat dustu! Onceki: {prev[0]:.0f} TL -> Simdi: {best['price']:.0f} TL ({diff_pct:.1f}%)"
+
         cur2.execute(
             "INSERT INTO price_history (route_id, price, airline, checked_at) VALUES (?,?,?,?)",
             (rid, best["price"], best["airline"], datetime.now().isoformat()),
@@ -248,26 +276,32 @@ def cmd_check():
         con2.commit()
         con2.close()
         messages.append(line)
+
     return "\n\n".join(messages) if messages else "Sonuc yok."
+
 
 def cmd_prices(args):
     if len(args) < 3:
         return "Kullanim: /prices ORIGIN DEST YYYY-MM-DD\nOrnek: /prices ADB ECN 2026-05-08"
+
     origin_q, dest_q, date_str = args[0], args[1], args[2]
     try:
         datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
         return "Tarih formati hatali. YYYY-MM-DD kullanin."
+
     origin = search_airport(origin_q)
     if not origin:
         return f"Kalkis havaalani bulunamadi: {origin_q}"
     dest = search_airport(dest_q)
     if not dest:
         return f"Varis havaalani bulunamadi: {dest_q}"
+
     api_resp = search_one_way(origin["entityId"], dest["entityId"], date_str)
     flights = parse_itineraries(api_resp)
     if not flights:
         return f"{origin['title']} -> {dest['title']} ({date_str}) icin ucus bulunamadi."
+
     lines = [f"*{origin['title']} -> {dest['title']}* | {date_str}\n"]
     for i, f in enumerate(flights, 1):
         stop_txt = "Direkt" if f["stops"] == 0 else f"{f['stops']} aktarma"
@@ -275,8 +309,9 @@ def cmd_prices(args):
         arr_time = f["arrival"][11:16] if len(f["arrival"]) > 16 else f["arrival"]
         h, m = divmod(f["duration_min"], 60)
         dur_txt = f"{h}s {m}dk" if h else f"{m}dk"
-        lines.append(f"{i}. {f['airline']} - {f['price_formatted']}  |  {stop_txt}  |  {dur_txt}  |  {dep_time}-{arr_time}")
+        lines.append(f"{i}. {f['airline']} - {f['price_formatted']} | {stop_txt} | {dur_txt} | {dep_time}-{arr_time}")
     return "\n".join(lines)
+
 
 def cmd_help():
     return (
@@ -289,46 +324,62 @@ def cmd_help():
         "/help - Bu mesaji goster"
     )
 
+
 # ---- Scheduled job ----
 def check_all_routes():
     log.info("Zamanlanmis fiyat kontrolu basliyor...")
-    result = cmd_check()
-    if result and result != "Takip edilen rota yok.":
-        send_telegram(result)
+    try:
+        result = cmd_check()
+        if result and result != "Takip edilen rota yok.":
+            send_telegram(result)
+    except Exception as e:
+        log.error(f"check_all_routes error: {e}")
     log.info("Fiyat kontrolu tamamlandi.")
+
 
 # ---- Telegram polling ----
 LAST_UPDATE_ID = 0
+
 
 def process_telegram_updates():
     global LAST_UPDATE_ID
     updates = get_updates(offset=LAST_UPDATE_ID + 1 if LAST_UPDATE_ID else None)
     for upd in updates:
         LAST_UPDATE_ID = upd["update_id"]
-        msg = upd.get("message", {})
-        text = msg.get("text", "").strip()
+        msg = upd.get("message")
+        if not msg:
+            continue
+        text = (msg.get("text") or "").strip()
         chat_id = str(msg.get("chat", {}).get("id", ""))
+
         if not text.startswith("/"):
             continue
+
         parts = text.split()
         command = parts[0].lower().split("@")[0]
         args = parts[1:]
-        if command == "/start":
-            reply = "Merhaba! Ucus takip botu aktif. /help yazarak komutlari gorebilirsin."
-        elif command == "/add":
-            reply = cmd_add(args)
-        elif command == "/remove":
-            reply = cmd_remove(args)
-        elif command == "/list":
-            reply = cmd_list()
-        elif command == "/check":
-            reply = cmd_check()
-        elif command == "/prices":
-            reply = cmd_prices(args)
-        elif command == "/help":
-            reply = cmd_help()
-        else:
-            reply = "Bilinmeyen komut. /help yazin."
+
+        try:
+            if command == "/start":
+                reply = "Merhaba! Ucus takip botu aktif. /help yazarak komutlari gorebilirsin."
+            elif command == "/add":
+                reply = cmd_add(args)
+            elif command == "/remove":
+                reply = cmd_remove(args)
+            elif command == "/list":
+                reply = cmd_list()
+            elif command == "/check":
+                reply = cmd_check()
+            elif command == "/prices":
+                reply = cmd_prices(args)
+            elif command == "/help":
+                reply = cmd_help()
+            else:
+                reply = "Bilinmeyen komut. /help yazin."
+        except Exception as e:
+            log.error(f"Command error ({command}): {e}")
+            reply = f"Komut islenirken hata olustu: {e}"
+
         send_to = chat_id or TELEGRAM_CHAT_ID
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": send_to, "text": reply, "parse_mode": "Markdown"}
@@ -337,17 +388,21 @@ def process_telegram_updates():
         except Exception as e:
             log.error(f"Reply error: {e}")
 
+
 # ---- Main ----
 def main():
     log.info("Bot baslatiliyor...")
     init_db()
+
     if not RAPIDAPI_KEY:
         log.error("RAPIDAPI_KEY ayarlanmamis!")
         return
     if not TELEGRAM_BOT_TOKEN:
         log.error("TELEGRAM_BOT_TOKEN ayarlanmamis!")
         return
+
     send_telegram("Bot aktif! /help yazarak komutlari gorebilirsin.", parse_mode=None)
+
     scheduler = BlockingScheduler()
     scheduler.add_job(
         check_all_routes,
@@ -360,11 +415,13 @@ def main():
         'interval',
         seconds=30
     )
+
     log.info(f"Her {CHECK_INTERVAL_HOURS} saatte bir fiyat kontrolu yapilacak.")
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         log.info("Bot durduruluyor...")
+
 
 if __name__ == "__main__":
     main()
