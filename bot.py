@@ -26,6 +26,13 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# ---- Price formatter ----
+def format_price(amount):
+    """Fiyati TL formatinda gosterir"""
+    if amount >= 1000:
+        return f"{amount:,.0f} TL".replace(",", ".")
+    return f"{amount:.0f} TL"
+
 # ---- Markdown escape helper ----
 def escape_md(text):
     """Escape Telegram Markdown special characters."""
@@ -137,6 +144,7 @@ def search_one_way(origin_sky_id, dest_sky_id, depart_date):
         "market": "TR",
         "locale": "tr-TR",
         "currency": "TRY",
+        "countryCode": "TR",
     }
     try:
         log.info(f"Ucus aranacak: {origin_sky_id} -> {dest_sky_id} tarih={depart_date}")
@@ -157,13 +165,15 @@ def parse_itineraries(api_response):
     data = api_response.get("data", {})
     if not data or not isinstance(data, dict):
         return flights
+    context = data.get("context", {})
+    log.info(f"API currency context: {context}")
+
     itineraries = data.get("itineraries", [])
     if not itineraries:
         log.info(f"Yanit icinde sefer bulunamadi. Data anahtarlari: {list(data.keys())}")
         return flights
-    for it in itineraries[:10]:
+    for it in itineraries[:30]:
         price_raw = it.get("price", {}).get("raw", 0)
-        price_fmt = it.get("price", {}).get("formatted", "N/A")
         legs = it.get("legs", [])
         if not legs:
             continue
@@ -177,7 +187,6 @@ def parse_itineraries(api_response):
         flights.append({
             "airline": airline,
             "price": price_raw,
-            "price_formatted": price_fmt,
             "departure": departure,
             "arrival": arrival,
             "duration_min": duration,
@@ -298,7 +307,8 @@ def cmd_check():
             messages.append(f"#{rid} {origin}->{dest} {date_str}: Ucus bulunamadi.")
             continue
         best = min(flights, key=lambda f: f["price"])
-        line = f"#{rid} {origin}->{dest} {date_str}\nEn ucuz: {best['airline']} {best['price_formatted']} ({best['stops']} aktarma, {best['duration_min']}dk)"
+        stop_txt = "Direkt" if best["stops"] == 0 else f"{best['stops']} aktarma"
+        line = f"#{rid} {origin}->{dest} {date_str}\nEn ucuz: {best['airline']} {format_price(best['price'])} ({stop_txt}, {best['duration_min']}dk)"
         with get_db() as con2:
             cur2 = con2.cursor()
             cur2.execute("SELECT price FROM price_history WHERE route_id=? ORDER BY id DESC LIMIT 1", (rid,))
@@ -306,7 +316,7 @@ def cmd_check():
             if prev and prev[0] > 0:
                 diff_pct = ((best["price"] - prev[0]) / prev[0]) * 100
                 if diff_pct < -PRICE_DROP_THRESHOLD:
-                    line += f"\n\u26a0 Fiyat dustu! Onceki: {prev[0]:.0f} TL -> Simdi: {best['price']:.0f} TL ({diff_pct:.1f}%)"
+                    line += f"\n\u26a0 Fiyat dustu! Onceki: {format_price(prev[0])} -> Simdi: {format_price(best['price'])} ({diff_pct:.1f}%)"
             cur2.execute(
                 "INSERT INTO price_history (route_id, price, airline, checked_at) VALUES (?,?,?,?)",
                 (rid, best["price"], best["airline"], datetime.now().isoformat()),
@@ -375,6 +385,8 @@ def cmd_prices(args):
 
     # En ucuzdan pahaliya sirala
     rows.sort(key=lambda x: x["cheapest"])
+    # En fazla 10 havayolu goster
+    rows = rows[:10]
 
     tarih_str = f"{dt.day} {TURKCE_AYLAR[dt.month]} {dt.year}"
     header = f"{origin_q.upper()} -> {dest_q.upper()} | {tarih_str}"
@@ -383,8 +395,8 @@ def cmd_prices(args):
 
     lines = [header, "", col_header, sep]
     for r in rows:
-        cheapest_str = f"{r['cheapest']:,.0f} TL".replace(",", ".")
-        avg_str = f"{r['avg']:,.0f} TL".replace(",", ".")
+        cheapest_str = format_price(r['cheapest'])
+        avg_str = format_price(r['avg'])
         lines.append(
             f"{r['name']:<15}| {cheapest_str:<9}| {avg_str:<9}| {r['stop_txt']:<8}| {r['dur_txt']}"
         )
@@ -392,7 +404,7 @@ def cmd_prices(args):
     # En ucuz ozet
     best = rows[0]
     best_stop = "Direkt" if best["stops_raw"] == 0 else f"{best['stops_raw']} aktarma"
-    best_price_str = f"{best['cheapest']:,.0f} TL".replace(",", ".")
+    best_price_str = format_price(best['cheapest'])
     lines.append("")
     lines.append(f"\U0001f4b0 En ucuz: {best['name']} {best_price_str} ({best_stop}, {best['dur_txt']})")
 
@@ -431,8 +443,7 @@ def cmd_best(args):
         dt = datetime(year, month, day)
         if dt.weekday() == 4:  # Cuma
             friday = dt
-            sunday = friday + timedelta(days=2)
-            # Pazar ay disina cikiyorsa atla
+            sunday = friday + timedelta(days=2)  # Pazar
             if sunday.month != month:
                 continue
             weekends.append((friday, sunday))
@@ -441,9 +452,6 @@ def cmd_best(args):
         return f"{TURKCE_AYLAR[month]} {year} icinde uygun hafta sonu bulunamadi."
 
     log.info(f"/best komutu: {origin_q} -> {dest_q} ay={month_str}, {len(weekends)} hafta sonu taranacak")
-
-    # Kullaniciya bilgi mesaji
-    scan_msg = f"\U0001f50d Taraniyor... {len(weekends)} hafta sonu kontrol edilecek"
 
     results = []
     for friday, sunday in weekends:
@@ -460,61 +468,94 @@ def cmd_best(args):
         return_flights = parse_itineraries(return_resp)
         time.sleep(0.5)
 
-        if not outbound_flights or not return_flights:
-            log.info(f"{fri_str}-{sun_str} icin ucus bulunamadi, atlanacak.")
+        if not outbound_flights and not return_flights:
+            log.info(f"{fri_str}-{sun_str} icin hic ucus bulunamadi, atlanacak.")
             continue
 
-        best_out = min(outbound_flights, key=lambda x: x["price"])
-        best_ret = min(return_flights, key=lambda x: x["price"])
-        total = best_out["price"] + best_ret["price"]
+        # Direkt ve aktarmali ucuslari ayir
+        out_direct = [f for f in outbound_flights if f["stops"] == 0]
+        out_transfer = [f for f in outbound_flights if f["stops"] > 0]
+        ret_direct = [f for f in return_flights if f["stops"] == 0]
+        ret_transfer = [f for f in return_flights if f["stops"] > 0]
 
-        results.append({
-            "friday": friday,
-            "sunday": sunday,
-            "total": total,
-            "outbound": best_out,
-            "return": best_ret,
-        })
+        # Direkt en ucuz
+        best_out_direct = min(out_direct, key=lambda x: x["price"]) if out_direct else None
+        best_ret_direct = min(ret_direct, key=lambda x: x["price"]) if ret_direct else None
+        direct_total = None
+        if best_out_direct and best_ret_direct:
+            direct_total = best_out_direct["price"] + best_ret_direct["price"]
+
+        # Aktarmali en ucuz
+        best_out_transfer = min(out_transfer, key=lambda x: x["price"]) if out_transfer else None
+        best_ret_transfer = min(ret_transfer, key=lambda x: x["price"]) if ret_transfer else None
+        transfer_total = None
+        if best_out_transfer and best_ret_transfer:
+            transfer_total = best_out_transfer["price"] + best_ret_transfer["price"]
+
+        # En az biri varsa ekle
+        if direct_total is not None or transfer_total is not None:
+            sort_price = direct_total if direct_total is not None else transfer_total
+            results.append({
+                "friday": friday,
+                "sunday": sunday,
+                "sort_price": sort_price,
+                "direct_total": direct_total,
+                "transfer_total": transfer_total,
+                "out_direct": best_out_direct,
+                "ret_direct": best_ret_direct,
+                "out_transfer": best_out_transfer,
+                "ret_transfer": best_ret_transfer,
+            })
 
     if not results:
         return f"{origin_q.upper()} -> {dest_q.upper()} | {TURKCE_AYLAR[month]} {year} icin ucus bulunamadi."
 
     # En ucuzdan pahaliya sirala
-    results.sort(key=lambda x: x["total"])
+    results.sort(key=lambda x: x["sort_price"])
 
-    medals = ["\U0001f947", "\U0001f948", "\U0001f949"]  # gold, silver, bronze
+    medals = ["\U0001f947", "\U0001f948", "\U0001f949"]
     ay_adi = TURKCE_AYLAR[month]
 
-    lines = [scan_msg, ""]
-    lines.append(f"\u2708\ufe0f {origin_q.upper()} -> {dest_q.upper()} | {ay_adi} {year} Hafta Sonu Fiyatlari")
+    lines = [f"\u2708\ufe0f {origin_q.upper()} -> {dest_q.upper()} | {ay_adi} {year} Hafta Sonu Fiyatlari"]
     lines.append("")
 
     for i, r in enumerate(results):
         medal = medals[i] if i < 3 else f" {i+1}."
-
         fri_day = r["friday"].day
         sun_day = r["sunday"].day
 
-        total_str = f"{r['total']:,.0f} TL".replace(",", ".")
+        lines.append(f"{medal} {fri_day}-{sun_day} {ay_adi}")
 
-        out = r["outbound"]
-        ret = r["return"]
+        # Direkt bolumu
+        lines.append("  \u2705 Direkt:")
+        if r["direct_total"] is not None:
+            od = r["out_direct"]
+            rd = r["ret_direct"]
+            h_o, m_o = divmod(od["duration_min"], 60)
+            dur_o = f"{h_o}s {m_o:02d}dk" if h_o else f"{m_o}dk"
+            h_r, m_r = divmod(rd["duration_min"], 60)
+            dur_r = f"{h_r}s {m_r:02d}dk" if h_r else f"{m_r}dk"
+            lines.append(f"  Gidis: {od['airline']} {format_price(od['price'])} ({dur_o})")
+            lines.append(f"  Donus: {rd['airline']} {format_price(rd['price'])} ({dur_r})")
+            lines.append(f"  Toplam: {format_price(r['direct_total'])}")
+        else:
+            lines.append("  Direkt ucus yok")
 
-        out_price_str = f"{out['price']:,.0f} TL".replace(",", ".")
-        ret_price_str = f"{ret['price']:,.0f} TL".replace(",", ".")
+        # Aktarmali bolumu
+        lines.append("  \U0001f504 Aktarmali:")
+        if r["transfer_total"] is not None:
+            ot = r["out_transfer"]
+            rt = r["ret_transfer"]
+            h_o, m_o = divmod(ot["duration_min"], 60)
+            dur_o = f"{h_o}s {m_o:02d}dk" if h_o else f"{m_o}dk"
+            h_r, m_r = divmod(rt["duration_min"], 60)
+            dur_r = f"{h_r}s {m_r:02d}dk" if h_r else f"{m_r}dk"
+            lines.append(f"  Gidis: {ot['airline']} {format_price(ot['price'])} ({ot['stops']} aktarma, {dur_o})")
+            lines.append(f"  Donus: {rt['airline']} {format_price(rt['price'])} ({rt['stops']} aktarma, {dur_r})")
+            lines.append(f"  Toplam: {format_price(r['transfer_total'])}")
+        else:
+            lines.append("  Aktarmali ucus yok")
 
-        out_stop = "Direkt" if out["stops"] == 0 else f"{out['stops']} aktarma"
-        ret_stop = "Direkt" if ret["stops"] == 0 else f"{ret['stops']} aktarma"
-
-        h_out, m_out = divmod(out["duration_min"], 60)
-        dur_out = f"{h_out}s {m_out:02d}dk" if h_out else f"{m_out}dk"
-
-        h_ret, m_ret = divmod(ret["duration_min"], 60)
-        dur_ret = f"{h_ret}s {m_ret:02d}dk" if h_ret else f"{m_ret}dk"
-
-        lines.append(f"{medal} {fri_day}-{sun_day} {ay_adi}: {total_str}")
-        lines.append(f"   Gidis: {out['airline']} {out_price_str} ({out_stop}, {dur_out})")
-        lines.append(f"   Donus: {ret['airline']} {ret_price_str} ({ret_stop}, {dur_ret})")
         lines.append("")
 
     return "\n".join(lines).rstrip()
