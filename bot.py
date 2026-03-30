@@ -346,7 +346,6 @@ def cmd_prices(args):
     if len(args) < 3:
         return "Kullanim: /prices ORIGIN DEST YYYY-MM-DD\nOrnek: /prices ADB ECN 2026-05-08"
     origin_q, dest_q, date_str = args[0], args[1], args[2]
-
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
@@ -365,7 +364,6 @@ def cmd_prices(args):
         return f"Varis havaalani bulunamadi: {dest_q}"
 
     log.info(f"/prices komutu: {origin_q} -> {dest_q} tarih={date_str}")
-
     api_resp = search_one_way(origin["skyId"], dest["skyId"], date_str)
     flights = parse_itineraries(api_resp)
 
@@ -384,48 +382,47 @@ def cmd_prices(args):
     for name, group in airline_data.items():
         cheapest = min(group, key=lambda x: x["price"])
         avg_price = sum(x["price"] for x in group) / len(group)
-
-        # Aktarma bilgisi: gruptaki en ucuzun aktarma sayisi
+        flight_count = len(group)
         stop_txt = "Direkt" if cheapest["stops"] == 0 else str(cheapest["stops"])
-        dur_txt = format_duration(cheapest["duration_min"])
-
+        min_duration = min(x["duration_min"] for x in group)
+        dur_txt = format_duration(min_duration)
         rows.append({
             "name": name,
             "cheapest": cheapest["price"],
             "avg": avg_price,
+            "count": flight_count,
             "stop_txt": stop_txt,
             "dur_txt": dur_txt,
             "stops_raw": cheapest["stops"],
-            "duration_min": cheapest["duration_min"],
+            "duration_min": min_duration,
         })
 
     # En ucuzdan pahaliya sirala
     rows.sort(key=lambda x: x["cheapest"])
-    # En fazla 10 havayolu goster
     rows = rows[:10]
 
+    # Genel ortalama hesapla
+    total_all = sum(f["price"] for f in flights)
+    genel_ort = total_all / len(flights) if flights else 0
+
     tarih_str = f"{dt.day} {TURKCE_AYLAR[dt.month]} {dt.year}"
-    header = f"{origin_q.upper()} -> {dest_q.upper()} | {tarih_str}"
-    col_header = f"{'Havayolu':<15}| {'En Ucuz':<9}| {'Ort.':<9}| {'Aktarma':<8}| Sure"
-    sep = "-" * len(col_header)
+    header = f"\u2708\ufe0f {origin_q.upper()} -> {dest_q.upper()} | {tarih_str}"
+    col_header = f"{'Havayolu':<16} | {'En Ucuz':<9} | {'Ortalama':<9} | {'Sefer':<5} | {'Aktarma':<7} | Sure"
+    sep = "-" * 65
 
     lines = [header, "", col_header, sep]
     for r in rows:
-        cheapest_str = format_price(r['cheapest'])
-        avg_str = format_price(r['avg'])
         lines.append(
-            f"{r['name']:<15}| {cheapest_str:<9}| {avg_str:<9}| {r['stop_txt']:<8}| {r['dur_txt']}"
+            f"{r['name']:<16} | {format_price(r['cheapest']):<9} | {format_price(r['avg']):<9} | {r['count']:<5} | {r['stop_txt']:<7} | {r['dur_txt']}"
         )
 
     # En ucuz ozet
     best = rows[0]
     best_stop = "Direkt" if best["stops_raw"] == 0 else f"{best['stops_raw']} aktarma"
-    best_price_str = format_price(best['cheapest'])
     lines.append("")
-    lines.append(f"\U0001f4b0 En ucuz: {best['name']} {best_price_str} ({best_stop}, {best['dur_txt']})")
-
+    lines.append(f"\U0001f4b0 En ucuz: {best['name']} {format_price(best['cheapest'])} ({best_stop}, {best['dur_txt']})")
+    lines.append(f"\U0001f4ca Ortalama fiyat: {format_price(genel_ort)} (tum havayollari)")
     return "\n".join(lines)
-
 def cmd_best(args):
     if len(args) < 3:
         return "Kullanim: /best ORIGIN DEST YYYY-MM\nOrnek: /best IST ECN 2026-06"
@@ -452,14 +449,13 @@ def cmd_best(args):
     if not dest:
         return f"Varis havaalani bulunamadi: {dest_q}"
 
-    # Aydaki tum Cuma-Pazar ciftlerini bul
     _, days_in_month = calendar.monthrange(year, month)
     weekends = []
     for day in range(1, days_in_month + 1):
         dt = datetime(year, month, day)
-        if dt.weekday() == 4:  # Cuma
+        if dt.weekday() == 4:
             friday = dt
-            sunday = friday + timedelta(days=2)  # Pazar
+            sunday = friday + timedelta(days=2)
             if sunday.month != month:
                 continue
             weekends.append((friday, sunday))
@@ -488,27 +484,23 @@ def cmd_best(args):
             log.info(f"{fri_str}-{sun_str} icin hic ucus bulunamadi, atlanacak.")
             continue
 
-        # Direkt ve aktarmali ucuslari ayir
         out_direct = [f for f in outbound_flights if f["stops"] == 0]
         out_transfer = [f for f in outbound_flights if f["stops"] > 0]
         ret_direct = [f for f in return_flights if f["stops"] == 0]
         ret_transfer = [f for f in return_flights if f["stops"] > 0]
 
-        # Direkt en ucuz
         best_out_direct = min(out_direct, key=lambda x: x["price"]) if out_direct else None
         best_ret_direct = min(ret_direct, key=lambda x: x["price"]) if ret_direct else None
         direct_total = None
         if best_out_direct and best_ret_direct:
             direct_total = best_out_direct["price"] + best_ret_direct["price"]
 
-        # Aktarmali en ucuz
         best_out_transfer = min(out_transfer, key=lambda x: x["price"]) if out_transfer else None
         best_ret_transfer = min(ret_transfer, key=lambda x: x["price"]) if ret_transfer else None
         transfer_total = None
         if best_out_transfer and best_ret_transfer:
             transfer_total = best_out_transfer["price"] + best_ret_transfer["price"]
 
-        # En az biri varsa ekle
         if direct_total is not None or transfer_total is not None:
             sort_price = direct_total if direct_total is not None else transfer_total
             results.append({
@@ -521,12 +513,12 @@ def cmd_best(args):
                 "ret_direct": best_ret_direct,
                 "out_transfer": best_out_transfer,
                 "ret_transfer": best_ret_transfer,
+                "outbound_flights": outbound_flights,
             })
 
     if not results:
         return f"{origin_q.upper()} -> {dest_q.upper()} | {TURKCE_AYLAR[month]} {year} icin ucus bulunamadi."
 
-    # En ucuzdan pahaliya sirala
     results.sort(key=lambda x: x["sort_price"])
 
     medals = ["\U0001f947", "\U0001f948", "\U0001f949"]
@@ -542,7 +534,6 @@ def cmd_best(args):
 
         lines.append(f"{medal} {fri_day}-{sun_day} {ay_adi}")
 
-        # Direkt bolumu
         lines.append("  \u2705 Direkt:")
         if r["direct_total"] is not None:
             od = r["out_direct"]
@@ -553,7 +544,6 @@ def cmd_best(args):
         else:
             lines.append("  Direkt ucus yok")
 
-        # Aktarmali bolumu
         lines.append("  \U0001f504 Aktarmali:")
         if r["transfer_total"] is not None:
             ot = r["out_transfer"]
@@ -564,10 +554,27 @@ def cmd_best(args):
         else:
             lines.append("  Aktarmali ucus yok")
 
+        ob_flights = r["outbound_flights"]
+        if ob_flights:
+            airline_avgs = {}
+            for f in ob_flights:
+                aname = f["airline"]
+                if aname not in airline_avgs:
+                    airline_avgs[aname] = []
+                airline_avgs[aname].append(f["price"])
+            avg_list = []
+            for aname, prices in airline_avgs.items():
+                avg_val = sum(prices) / len(prices) if prices else 0
+                avg_list.append((aname, avg_val))
+            avg_list.sort(key=lambda x: x[1])
+            avg_list = avg_list[:5]
+            avg_parts = [f"{aname}: {format_price(avg)}" for aname, avg in avg_list]
+            lines.append(f"  \U0001f4ca Havayolu Ortalamalari (gidis):")
+            lines.append(f"  {' | '.join(avg_parts)}")
+
         lines.append("")
 
     return "\n".join(lines).rstrip()
-
 def cmd_currency(args):
     global ACTIVE_CURRENCY
     if not args:
