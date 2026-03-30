@@ -20,6 +20,14 @@ PRICE_DROP_THRESHOLD = float(os.environ.get("PRICE_DROP_THRESHOLD", "5"))
 RAPIDAPI_HOST = "flights-sky.p.rapidapi.com"
 DB_PATH = Path("data/flights.db")
 
+# Desteklenen para birimleri ve sembolleri
+CURRENCIES = {
+    "TRY": {"symbol": "₺", "label": "TL", "market": "TR", "locale": "tr-TR"},
+    "USD": {"symbol": "$", "label": "USD", "market": "US", "locale": "en-US"},
+    "EUR": {"symbol": "€", "label": "EUR", "market": "DE", "locale": "de-DE"},
+}
+ACTIVE_CURRENCY = os.environ.get("DEFAULT_CURRENCY", "TRY")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
@@ -28,10 +36,19 @@ log = logging.getLogger(__name__)
 
 # ---- Price formatter ----
 def format_price(amount):
-    """Fiyati TL formatinda gosterir"""
+    """Fiyati aktif para biriminde formatlar"""
+    cur = CURRENCIES[ACTIVE_CURRENCY]
     if amount >= 1000:
-        return f"{amount:,.0f} TL".replace(",", ".")
-    return f"{amount:.0f} TL"
+        return f"{amount:,.0f} {cur['label']}".replace(",", ".")
+    return f"{amount:.0f} {cur['label']}"
+
+# ---- Duration formatter ----
+def format_duration(minutes):
+    """Sureyi saat-dakika formatinda gosterir"""
+    h, m = divmod(minutes, 60)
+    if h:
+        return f"{h}s {m}dk"
+    return f"{m}dk"
 
 # ---- Markdown escape helper ----
 def escape_md(text):
@@ -137,14 +154,14 @@ def search_one_way(origin_sky_id, dest_sky_id, depart_date):
         log.warning("Rate limit asildi, ucus aramasi atlaniyor")
         return None
     url = "https://flights-sky.p.rapidapi.com/flights/search-one-way"
+    cur = CURRENCIES[ACTIVE_CURRENCY]
     params = {
         "fromEntityId": origin_sky_id,
         "toEntityId": dest_sky_id,
         "departDate": depart_date,
-        "market": "TR",
-        "locale": "tr-TR",
-        "currency": "TRY",
-        "countryCode": "TR",
+        "currency": ACTIVE_CURRENCY,
+        "market": cur["market"],
+        "locale": cur["locale"],
     }
     try:
         log.info(f"Ucus aranacak: {origin_sky_id} -> {dest_sky_id} tarih={depart_date}")
@@ -308,7 +325,7 @@ def cmd_check():
             continue
         best = min(flights, key=lambda f: f["price"])
         stop_txt = "Direkt" if best["stops"] == 0 else f"{best['stops']} aktarma"
-        line = f"#{rid} {origin}->{dest} {date_str}\nEn ucuz: {best['airline']} {format_price(best['price'])} ({stop_txt}, {best['duration_min']}dk)"
+        line = f"#{rid} {origin}->{dest} {date_str}\nEn ucuz: {best['airline']} {format_price(best['price'])} ({stop_txt}, {format_duration(best['duration_min'])})"
         with get_db() as con2:
             cur2 = con2.cursor()
             cur2.execute("SELECT price FROM price_history WHERE route_id=? ORDER BY id DESC LIMIT 1", (rid,))
@@ -370,8 +387,7 @@ def cmd_prices(args):
 
         # Aktarma bilgisi: gruptaki en ucuzun aktarma sayisi
         stop_txt = "Direkt" if cheapest["stops"] == 0 else str(cheapest["stops"])
-        h, m = divmod(cheapest["duration_min"], 60)
-        dur_txt = f"{h}s {m:02d}dk" if h else f"{m}dk"
+        dur_txt = format_duration(cheapest["duration_min"])
 
         rows.append({
             "name": name,
@@ -531,12 +547,8 @@ def cmd_best(args):
         if r["direct_total"] is not None:
             od = r["out_direct"]
             rd = r["ret_direct"]
-            h_o, m_o = divmod(od["duration_min"], 60)
-            dur_o = f"{h_o}s {m_o:02d}dk" if h_o else f"{m_o}dk"
-            h_r, m_r = divmod(rd["duration_min"], 60)
-            dur_r = f"{h_r}s {m_r:02d}dk" if h_r else f"{m_r}dk"
-            lines.append(f"  Gidis: {od['airline']} {format_price(od['price'])} ({dur_o})")
-            lines.append(f"  Donus: {rd['airline']} {format_price(rd['price'])} ({dur_r})")
+            lines.append(f"  Gidis: {od['airline']} {format_price(od['price'])} ({format_duration(od['duration_min'])})")
+            lines.append(f"  Donus: {rd['airline']} {format_price(rd['price'])} ({format_duration(rd['duration_min'])})")
             lines.append(f"  Toplam: {format_price(r['direct_total'])}")
         else:
             lines.append("  Direkt ucus yok")
@@ -546,12 +558,8 @@ def cmd_best(args):
         if r["transfer_total"] is not None:
             ot = r["out_transfer"]
             rt = r["ret_transfer"]
-            h_o, m_o = divmod(ot["duration_min"], 60)
-            dur_o = f"{h_o}s {m_o:02d}dk" if h_o else f"{m_o}dk"
-            h_r, m_r = divmod(rt["duration_min"], 60)
-            dur_r = f"{h_r}s {m_r:02d}dk" if h_r else f"{m_r}dk"
-            lines.append(f"  Gidis: {ot['airline']} {format_price(ot['price'])} ({ot['stops']} aktarma, {dur_o})")
-            lines.append(f"  Donus: {rt['airline']} {format_price(rt['price'])} ({rt['stops']} aktarma, {dur_r})")
+            lines.append(f"  Gidis: {ot['airline']} {format_price(ot['price'])} ({ot['stops']} aktarma, {format_duration(ot['duration_min'])})")
+            lines.append(f"  Donus: {rt['airline']} {format_price(rt['price'])} ({rt['stops']} aktarma, {format_duration(rt['duration_min'])})")
             lines.append(f"  Toplam: {format_price(r['transfer_total'])}")
         else:
             lines.append("  Aktarmali ucus yok")
@@ -559,6 +567,18 @@ def cmd_best(args):
         lines.append("")
 
     return "\n".join(lines).rstrip()
+
+def cmd_currency(args):
+    global ACTIVE_CURRENCY
+    if not args:
+        cur = CURRENCIES[ACTIVE_CURRENCY]
+        return f"Aktif para birimi: {ACTIVE_CURRENCY} ({cur['symbol']})\nDegistirmek icin: /currency TRY veya /currency USD veya /currency EUR"
+    choice = args[0].upper()
+    if choice not in CURRENCIES:
+        return "Gecersiz para birimi. Desteklenen: TRY, USD, EUR"
+    ACTIVE_CURRENCY = choice
+    cur = CURRENCIES[choice]
+    return f"Para birimi degistirildi: {choice} ({cur['symbol']})"
 
 def cmd_help():
     return (
@@ -569,6 +589,7 @@ def cmd_help():
         "/check - Tum rotalarin guncel fiyatlarini kontrol et\n"
         "/prices ORIGIN DEST YYYY-MM-DD - Havayolu bazli fiyat tablosu\n"
         "/best ORIGIN DEST YYYY-MM - Aydaki en ucuz hafta sonu\n"
+        "/currency [TRY/USD/EUR] - Para birimi degistir\n"
         "/help - Bu mesaji goster"
     )
 
@@ -633,6 +654,8 @@ def process_telegram_updates():
                 reply = cmd_best(args)
                 send_telegram(reply, chat_id=chat_id, parse_mode=None)
                 continue
+            elif command == "/currency":
+                reply = cmd_currency(args)
             elif command == "/help":
                 reply = cmd_help()
             else:
